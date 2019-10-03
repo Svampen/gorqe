@@ -1,0 +1,3 @@
+[submodule "proto/rqe_pb"]
+	path = proto/rqe_pb
+	url = git@github.com:Svampen/rqe_pb.git

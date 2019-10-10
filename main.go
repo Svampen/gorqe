@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/golang/protobuf/jsonpb"
 	"github.com/jedib0t/go-pretty/list"
 	"github.com/jedib0t/go-pretty/table"
 	"github.com/jedib0t/go-pretty/text"
@@ -46,11 +47,18 @@ func init() {
 				Aliases: []string{"c"},
 				Usage:   "cluster commands",
 				Subcommands: []*cli.Command{
-					&cli.Command{
+					{
 						Name:    "status",
 						Aliases: []string{"s"},
 						Usage:   "get status for cluster",
 						Action:  clusterStatus,
+					},
+					{
+						Name:      "add",
+						Aliases:   []string{"a"},
+						Usage:     "add <node> to cluster",
+						Action:    addNode,
+						UsageText: "check status afterwards to see node as been successfully added",
 					},
 				},
 			},
@@ -93,6 +101,11 @@ func init() {
 								DefaultText: "10000",
 								Aliases:     []string{"et"},
 							},
+							&cli.StringFlag{
+								Name:    "file",
+								Aliases: []string{"f"},
+								Usage:   "`file` to be read as entry",
+							},
 						},
 					},
 				},
@@ -129,6 +142,37 @@ func clusterStatus(c *cli.Context) error {
 	return nil
 }
 
+func addNode(c *cli.Context) error {
+	if c.NArg() == 0 {
+		return cli.Exit("Missing node argument", 12)
+	}
+	node := c.Args().First()
+
+	request := &pb.Request{
+		Msg: &pb.Request_AddNodeRequest{
+			AddNodeRequest: &pb.AddNodeRequest{
+				Node:   node,
+				Module: "rqe_gw",
+			},
+		},
+	}
+
+	response, err := sendReceiveMessage(c, request)
+	if err != nil || response == nil {
+		fmt.Println(err)
+		return cli.Exit("error", 10)
+	}
+
+	switch response.GetMsg().(type) {
+	case *pb.Response_AddNodeResponse:
+		parseAddNodeResponse(response.GetAddNodeResponse(), c, node)
+	default:
+		return cli.Exit("wrong responses message returned from RQE", 5)
+	}
+
+	return nil
+}
+
 func parseClusterStatusResponse(statusReponse *pb.StatusResponse) {
 	t := table.NewWriter()
 	t.SetOutputMirror(os.Stdout)
@@ -144,6 +188,14 @@ func parseClusterStatusResponse(statusReponse *pb.StatusResponse) {
 	}
 	t.AppendFooter(table.Row{"", "", "Total", totalRqCount})
 	t.Render()
+}
+
+func parseAddNodeResponse(addNodeResponse *pb.AddNodeResponse, c *cli.Context, node string) {
+	if !c.Bool("nocolor") {
+		fmt.Printf(text.Colors{text.FgGreen}.Sprint("node ", node, " added\n"))
+	} else {
+		fmt.Print("node ", node, " added\n")
+	}
 }
 
 func parseAddRQResponse(addRQResponse *pb.AddRQResponse, c *cli.Context) {
@@ -273,24 +325,42 @@ func deleteRQ(c *cli.Context) error {
 }
 
 func matchEntry(c *cli.Context) error {
-	if c.NArg() == 0 {
+	if c.NArg() == 0 && c.String("file") == "" {
 		return cli.Exit("Missing entry argument", 12)
 	}
-	var entry map[string]*pb.MatchEntryRequest_EntryValue = make(map[string]*pb.MatchEntryRequest_EntryValue)
-	for _, kv := range c.Args().Slice() {
-		keyvalue := strings.Split(kv, "=")
-		if len(keyvalue) != 2 {
-			return cli.Exit("Entry part "+kv+" not in correct format", 13)
+	requestMatchEntryRequest := pb.Request_MatchEntryRequest{}
+	if c.String("file") != "" {
+		jsonFile, err := os.Open(c.String("file"))
+		if err != nil {
+			fmt.Println(err)
+			return cli.Exit("Couldn't read entry file", 13)
 		}
-		buildEntry(entry, keyvalue[0], keyvalue[1])
+		matchEntryRequest := pb.MatchEntryRequest{}
+		err = jsonpb.Unmarshal(jsonFile, &matchEntryRequest)
+		if err != nil {
+			fmt.Println(err)
+			return cli.Exit("Couldn't turn json entry into protobuf", 14)
+		}
+		fmt.Println("looking for a match for ", matchEntryRequest.String())
+		requestMatchEntryRequest.MatchEntryRequest = &matchEntryRequest
+		requestMatchEntryRequest.MatchEntryRequest.Timeout = int32(c.Int("entry_timeout"))
+	} else {
+		var entry map[string]*pb.MatchEntryRequest_EntryValue = make(map[string]*pb.MatchEntryRequest_EntryValue)
+		for _, kv := range c.Args().Slice() {
+			keyvalue := strings.Split(kv, "=")
+			if len(keyvalue) != 2 {
+				return cli.Exit("Entry part "+kv+" not in correct format", 13)
+			}
+			buildEntry(entry, keyvalue[0], keyvalue[1])
+		}
+		matchEntryRequest := pb.MatchEntryRequest{
+			Entry:   entry,
+			Timeout: int32(c.Int("entry_timeout")),
+		}
+		requestMatchEntryRequest.MatchEntryRequest = &matchEntryRequest
 	}
 	req := &pb.Request{
-		Msg: &pb.Request_MatchEntryRequest{
-			MatchEntryRequest: &pb.MatchEntryRequest{
-				Entry:   entry,
-				Timeout: int32(c.Int("entry_timeout")),
-			},
-		},
+		Msg: &requestMatchEntryRequest,
 	}
 
 	response, err := sendReceiveMessage(c, req)
@@ -336,13 +406,13 @@ func buildEntry(entry map[string]*pb.MatchEntryRequest_EntryValue, key string, v
 
 func buildRQItem() *pb.RQItem {
 	typeOptions := pb.RQItemTypeOptions{
-		Operator: pb.RQItemTypeOptions_GT,
+		Operator: pb.RQItemTypeOptions_NULL,
 	}
-	value := pb.RQItem_Integer{
-		Integer: 10,
+	value := pb.RQItem_Boolean{
+		Boolean: false,
 	}
 	rqItem := pb.RQItem{
-		Key:         "testing",
+		Key:         "crafted",
 		Value:       &value,
 		TypeOptions: &typeOptions,
 	}
